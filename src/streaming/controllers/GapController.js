@@ -195,6 +195,9 @@ function GapController() {
      * @private
      */
     function _shouldCheckForGaps(checkSeekingState = false) {
+        if (!streamController.getActiveStream()) {
+            return false;
+        }
         const trackSwitchInProgress = Object.keys(trackSwitchByMediaType).some((key) => {
             return trackSwitchByMediaType[key];
         });
@@ -211,7 +214,7 @@ function GapController() {
      */
     function _shouldIgnoreSeekingState() {
         const activeStream = streamController.getActiveStream();
-        const streamEnd = parseFloat((activeStream.getStartTime().toFixed(5) + activeStream.getDuration()).toFixed(5))
+        const streamEnd = parseFloat((activeStream.getStartTime() + activeStream.getDuration()).toFixed(5))
 
         return playbackController.getTime() + settings.get().streaming.gaps.threshold >= streamEnd;
     }
@@ -244,6 +247,22 @@ function GapController() {
         } catch (e) {
             return null;
         }
+    }
+
+    /**
+     * Check if the currentTime exist within the buffered range
+     * @param {object} ranges
+     * @param {number} currentTime
+     * @private
+     * @return {boolean}
+     */
+    function _isTimeBuffered(ranges, currentTime) {
+        for(let i = 0, len = ranges.length; i < len; i++) {
+            if (currentTime >= ranges.start(i) && currentTime <= ranges.end(i)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -286,6 +305,8 @@ function GapController() {
      * @private
      */
     function _jumpGap(currentTime, playbackStalled = false) {
+        const enableStallFix = settings.get().streaming.gaps.enableStallFix; 
+        const stallSeek = settings.get().streaming.gaps.stallSeek;
         const smallGapLimit = settings.get().streaming.gaps.smallGapLimit;
         const jumpLargeGaps = settings.get().streaming.gaps.jumpLargeGaps;
         const ranges = videoModel.getBufferRange();
@@ -311,6 +332,17 @@ function GapController() {
             seekToPosition = parseFloat(playbackController.getStreamEndTime().toFixed(5));
             jumpToStreamEnd = true;
         }
+        
+        if(enableStallFix && isNaN(seekToPosition) && playbackStalled && isNaN(nextRangeIndex) && _isTimeBuffered(ranges, currentTime)) {
+            if (stallSeek === 0) {
+                logger.warn(`Toggle play pause to break stall`);
+                videoModel.pause();
+                videoModel.play();
+            } else {
+                logger.warn(`Jumping ${stallSeek}s to break stall`);
+                seekToPosition = currentTime + stallSeek;
+            }
+        }
 
         if (seekToPosition > 0 && lastGapJumpPosition !== seekToPosition && seekToPosition > currentTime && !jumpTimeoutHandler) {
             const timeUntilGapEnd = seekToPosition - currentTime;
@@ -328,7 +360,7 @@ function GapController() {
 
                 jumpTimeoutHandler = window.setTimeout(() => {
                     playbackController.seek(seekToPosition, true, true);
-                    logger.warn(`Jumping gap occuring in period ${streamController.getActiveStream().getStreamId()} starting at ${start} and ending at ${seekToPosition}. Jumping by: ${timeUntilGapEnd - (timeToWait / 1000)}`);
+                    logger.warn(`Jumping gap occuring in period ${streamController.getActiveStream().getStreamId()} starting at ${start} and ending at ${seekToPosition}. Jumping by: ${seekToPosition - start}`);
                     jumpTimeoutHandler = null;
                 }, timeToWait);
             }

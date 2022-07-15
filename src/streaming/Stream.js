@@ -274,7 +274,7 @@ function Stream(config) {
             checkConfig();
 
             isUpdating = true;
-            addInlineEvents();
+            _addInlineEvents();
 
 
             let element = videoModel.getElement();
@@ -670,9 +670,11 @@ function Stream(config) {
 
         // Applies only for MSS streams
         if (manifest.refreshManifestOnSwitchTrack) {
-            logger.debug('Stream -  Refreshing manifest for switch track');
             trackChangedEvents.push(e);
-            manifestUpdater.refreshManifest();
+            if (!manifestUpdater.getIsUpdating()) {
+                logger.debug('Stream -  Refreshing manifest for switch track');
+                manifestUpdater.refreshManifest();
+            }
         } else {
             processor.selectMediaInfo(mediaInfo)
                 .then(() => {
@@ -692,10 +694,12 @@ function Stream(config) {
         }
     }
 
-    function addInlineEvents() {
+    function _addInlineEvents() {
         if (eventController) {
             const events = adapter.getEventsFor(streamInfo);
-            eventController.addInlineEvents(events);
+            if (events && events.length > 0) {
+                eventController.addInlineEvents(events, streamInfo.id);
+            }
         }
     }
 
@@ -713,7 +717,7 @@ function Stream(config) {
         if (protectionController) {
             // Need to check if streamProcessors exists because streamProcessors
             // could be cleared in case an error is detected while initializing DRM keysystem
-            protectionController.clearMediaInfoArrayByStreamId(getId());
+            protectionController.clearMediaInfoArray();
             for (let i = 0; i < ln && streamProcessors[i]; i++) {
                 const type = streamProcessors[i].getType();
                 const mediaInfo = streamProcessors[i].getMediaInfo();
@@ -732,9 +736,11 @@ function Stream(config) {
             errHandler.error(error);
         } else if (!isInitialized) {
             isInitialized = true;
-            eventBus.trigger(Events.STREAM_INITIALIZED, {
-                streamInfo: streamInfo
-            });
+            videoModel.waitForReadyState(Constants.VIDEO_ELEMENT_READY_STATES.HAVE_METADATA, () => {
+                eventBus.trigger(Events.STREAM_INITIALIZED, {
+                    streamInfo: streamInfo
+                });
+            })
         }
 
     }
@@ -783,7 +789,7 @@ function Stream(config) {
 
     function onInbandEvents(e) {
         if (eventController) {
-            eventController.addInbandEvents(e.events);
+            eventController.addInbandEvents(e.events, streamInfo.id);
         }
     }
 
@@ -838,7 +844,7 @@ function Stream(config) {
             streamInfo = updatedStreamInfo;
 
             if (eventController) {
-                addInlineEvents();
+                _addInlineEvents();
             }
 
             let promises = [];

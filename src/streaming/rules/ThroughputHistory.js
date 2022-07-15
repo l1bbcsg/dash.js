@@ -88,12 +88,12 @@ function ThroughputHistory(config) {
         const latencyTimeInMilliseconds = (httpRequest.tresponse.getTime() - httpRequest.trequest.getTime()) || 1;
         const downloadTimeInMilliseconds = (httpRequest._tfinish.getTime() - httpRequest.tresponse.getTime()) || 1; //Make sure never 0 we divide by this value. Avoid infinity!
         const downloadBytes = httpRequest.trace.reduce((a, b) => a + b.b[0], 0);
-
         let throughputMeasureTime = 0, throughput = 0;
-        if (settings.get().streaming.lowLatencyEnabled) {
+
+        if (httpRequest._fileLoaderType && httpRequest._fileLoaderType === Constants.FILE_LOADER_TYPES.FETCH) {
             const calculationMode = settings.get().streaming.abr.fetchThroughputCalculationMode;
             if (calculationMode === Constants.ABR_FETCH_THROUGHPUT_CALCULATION_MOOF_PARSING) {
-                const sumOfThroughputValues = httpRequest.trace.reduce((a, b) => a + b.t, 0);
+                const sumOfThroughputValues = httpRequest.trace.reduce((a, b) => a + b._t, 0);
                 throughput = Math.round(sumOfThroughputValues / httpRequest.trace.length);
             }
             if (throughput === 0) {
@@ -152,13 +152,13 @@ function ThroughputHistory(config) {
         ewmaObj.totalWeight += weight;
     }
 
-    function getSampleSize(isThroughput, mediaType, isLive) {
+    function getSampleSize(isThroughput, mediaType, isDynamic) {
         let arr,
             sampleSize;
 
         if (isThroughput) {
             arr = throughputDict[mediaType];
-            sampleSize = isLive ? AVERAGE_THROUGHPUT_SAMPLE_AMOUNT_LIVE : AVERAGE_THROUGHPUT_SAMPLE_AMOUNT_VOD;
+            sampleSize = isDynamic ? AVERAGE_THROUGHPUT_SAMPLE_AMOUNT_LIVE : AVERAGE_THROUGHPUT_SAMPLE_AMOUNT_VOD;
         } else {
             arr = latencyDict[mediaType];
             sampleSize = AVERAGE_LATENCY_SAMPLE_AMOUNT;

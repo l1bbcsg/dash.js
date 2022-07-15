@@ -43,11 +43,10 @@ function MssParser(config) {
     const debug = config.debug;
     const constants = config.constants;
     const manifestModel = config.manifestModel;
-    const mediaPlayerModel = config.mediaPlayerModel;
     const settings = config.settings;
 
     const DEFAULT_TIME_SCALE = 10000000.0;
-    const SUPPORTED_CODECS = ['AAC', 'AACL', 'AVC1', 'H264', 'TTML', 'DFXP'];
+    const SUPPORTED_CODECS = ['AAC', 'AACL', 'AACH', 'AACP', 'AVC1', 'H264', 'TTML', 'DFXP'];
     // MPEG-DASH Role and accessibility mapping for text tracks according to ETSI TS 103 285 v1.1.1 (section 7.1.2)
     const ROLE = {
         'CAPT': 'main',
@@ -725,7 +724,7 @@ function MssParser(config) {
         // 2- adapt live delay and then buffers length in case timeShiftBufferDepth is too small compared to target live delay (see PlaybackController.computeLiveDelay())
         // 3- Set retry attempts and intervals for FragmentInfo requests
         if (manifest.type === 'dynamic') {
-            let targetLiveDelay = mediaPlayerModel.getLiveDelay();
+            let targetLiveDelay = settings.get().streaming.delay.liveDelay;
             if (!targetLiveDelay) {
                 const liveDelayFragmentCount = settings.get().streaming.delay.liveDelayFragmentCount !== null && !isNaN(settings.get().streaming.delay.liveDelayFragmentCount) ? settings.get().streaming.delay.liveDelayFragmentCount : 4;
                 targetLiveDelay = segmentDuration * liveDelayFragmentCount;

@@ -85,7 +85,6 @@ function StreamProcessor(config) {
         representationController,
         shouldUseExplicitTimeForRequest,
         qualityChangeInProgress,
-        manifestUpdateInProgress,
         dashHandler,
         segmentsController,
         bufferingTime;
@@ -106,8 +105,6 @@ function StreamProcessor(config) {
         eventBus.on(Events.QUOTA_EXCEEDED, _onQuotaExceeded, instance);
         eventBus.on(Events.SET_FRAGMENTED_TEXT_AFTER_DISABLED, _onSetFragmentedTextAfterDisabled, instance);
         eventBus.on(Events.SET_NON_FRAGMENTED_TEXT, _onSetNonFragmentedText, instance);
-        eventBus.on(Events.MANIFEST_UPDATED, _onManifestUpdated, instance);
-        eventBus.on(Events.STREAMS_COMPOSED, _onStreamsComposed, instance);
         eventBus.on(Events.SOURCE_BUFFER_ERROR, _onSourceBufferError, instance);
     }
 
@@ -209,7 +206,6 @@ function StreamProcessor(config) {
         mediaInfo = null;
         bufferingTime = 0;
         shouldUseExplicitTimeForRequest = false;
-        manifestUpdateInProgress = false;
         qualityChangeInProgress = false;
     }
 
@@ -253,8 +249,6 @@ function StreamProcessor(config) {
         eventBus.off(Events.SET_FRAGMENTED_TEXT_AFTER_DISABLED, _onSetFragmentedTextAfterDisabled, instance);
         eventBus.off(Events.SET_NON_FRAGMENTED_TEXT, _onSetNonFragmentedText, instance);
         eventBus.off(Events.QUOTA_EXCEEDED, _onQuotaExceeded, instance);
-        eventBus.off(Events.MANIFEST_UPDATED, _onManifestUpdated, instance);
-        eventBus.off(Events.STREAMS_COMPOSED, _onStreamsComposed, instance);
         eventBus.off(Events.SOURCE_BUFFER_ERROR, _onSourceBufferError, instance);
 
         resetInitialSettings();
@@ -287,13 +281,14 @@ function StreamProcessor(config) {
                 })
                 .then(() => {
                     // Figure out the correct segment request time.
-                    const targetTime = bufferController.getContinuousBufferTimeForTargetTime(e.seekTime);
+                    const continuousBufferTime = bufferController.getContinuousBufferTimeForTargetTime(e.seekTime);
 
                     // If the buffer is continuous and exceeds the duration of the period we are still done buffering. We need to trigger the buffering completed event in order to start prebuffering upcoming periods again
-                    if (!isNaN(streamInfo.duration) && isFinite(streamInfo.duration) && targetTime >= streamInfo.start + streamInfo.duration) {
+                    if (!isNaN(continuousBufferTime) && !isNaN(streamInfo.duration) && isFinite(streamInfo.duration) && continuousBufferTime >= streamInfo.start + streamInfo.duration) {
                         bufferController.setIsBufferingCompleted(true);
                         resolve();
                     } else {
+                        const targetTime = isNaN(continuousBufferTime) ? e.seekTime : continuousBufferTime;
                         setExplicitBufferingTime(targetTime);
                         bufferController.setSeekTarget(targetTime);
 
@@ -364,7 +359,7 @@ function StreamProcessor(config) {
         // Event propagation may have been stopped (see MssHandler)
         if (!e.sender) return;
 
-        if (manifestUpdateInProgress) {
+        if (playbackController.getIsManifestUpdateInProgress()) {
             _noValidRequest();
             return;
         }
@@ -398,7 +393,7 @@ function StreamProcessor(config) {
      */
     function _onMediaFragmentNeeded(e, rescheduleIfNoRequest = true) {
         // Don't schedule next fragments while updating manifest or pruning to avoid buffer inconsistencies
-        if (manifestUpdateInProgress || bufferController.getIsPruningInProgress()) {
+        if (playbackController.getIsManifestUpdateInProgress() || bufferController.getIsPruningInProgress()) {
             _noValidRequest();
             return;
         }
@@ -440,12 +435,31 @@ function StreamProcessor(config) {
     function _noMediaRequestGenerated(rescheduleIfNoRequest) {
         const representation = representationController.getCurrentRepresentation();
 
-        // If  this statement is true we are stuck. A static manifest does not change and we did not find a valid request for the target time
+        // If  this statement is true we might be stuck. A static manifest does not change and we did not find a valid request for the target time
         // There is no point in trying again. We need to adjust the time in order to find a valid request. This can happen if the user/app seeked into a gap.
-        if (settings.get().streaming.gaps.enableSeekFix && !isDynamic && shouldUseExplicitTimeForRequest && playbackController.isSeeking()) {
-            const adjustedTime = dashHandler.getValidSeekTimeCloseToTargetTime(bufferingTime, mediaInfo, representation, settings.get().streaming.gaps.threshold);
-            if (!isNaN(adjustedTime)) {
-                playbackController.seek(adjustedTime, false, false);
+        // For dynamic manifests this can also happen especially if we jump over the gap in the previous period and are using SegmentTimeline and in case there is a positive eptDelta at the beginning of the period we are stuck.
+        if (settings.get().streaming.gaps.enableSeekFix && (shouldUseExplicitTimeForRequest || playbackController.getTime() === 0)) {
+            let adjustedTime;
+            if (!isDynamic) {
+                adjustedTime = dashHandler.getValidTimeAheadOfTargetTime(bufferingTime, mediaInfo, representation, settings.get().streaming.gaps.threshold);
+            } else if (isDynamic && representation.segmentInfoType === DashConstants.SEGMENT_TIMELINE) {
+                // If we find a valid request ahead of the current time then we are in a gap. Segments are only added at the end of the timeline
+                adjustedTime = dashHandler.getValidTimeAheadOfTargetTime(bufferingTime, mediaInfo, representation, settings.get().streaming.gaps.threshold,);
+            }
+            if (!isNaN(adjustedTime) && adjustedTime !== bufferingTime) {
+                if (playbackController.isSeeking() || playbackController.getTime() === 0) {
+                    // If we are seeking then playback is stalled. Do a seek to get out of this situation
+                    logger.warn(`Adjusting playback time ${adjustedTime} because of gap in the manifest. Seeking by ${adjustedTime - bufferingTime}`);
+                    playbackController.seek(adjustedTime, false, false);
+                } else {
+                    // If we are not seeking we should still be playing but we cant find anything to buffer. So we adjust the buffering time and leave the gap jump to the GapController
+                    logger.warn(`Adjusting buffering time ${adjustedTime} because of gap in the manifest. Adjusting time by ${adjustedTime - bufferingTime}`);
+                    setExplicitBufferingTime(adjustedTime)
+
+                    if (rescheduleIfNoRequest) {
+                        _noValidRequest();
+                    }
+                }
                 return;
             }
         }
@@ -517,20 +531,7 @@ function StreamProcessor(config) {
      * @private
      */
     function _noValidRequest() {
-        scheduleController.startScheduleTimer(settings.get().streaming.lowLatencyEnabled ? settings.get().streaming.scheduling.lowLatencyTimeout : settings.get().streaming.scheduling.defaultTimeout);
-    }
-
-    /**
-     * A new manifest has been loaded, updating is still in progress. Wait for the update to be finished before fetching new segments.
-     * Otherwise we end up in inconsistencies like wrong base urls especially if periods have been removed.
-     * @private
-     */
-    function _onManifestUpdated() {
-        manifestUpdateInProgress = true;
-    }
-
-    function _onStreamsComposed() {
-        manifestUpdateInProgress = false;
+        scheduleController.startScheduleTimer(playbackController.getLowLatencyModeEnabled() ? settings.get().streaming.scheduling.lowLatencyTimeout : settings.get().streaming.scheduling.defaultTimeout);
     }
 
     function _onDataUpdateCompleted(e) {
@@ -607,7 +608,7 @@ function StreamProcessor(config) {
         scheduleController.setCurrentRepresentation(representationInfo);
         representationController.prepareQualityChange(newQuality);
 
-        // Abort the current request to avoid inconsistencies. A quality switch can also be triggered manually by the application.
+        // Abort the current request to avoid inconsistencies and in case a rule such as AbandonRequestRule has forced a quality switch. A quality switch can also be triggered manually by the application.
         // If we update the buffer values now, or initialize a request to the new init segment, the currently downloading media segment might "work" with wrong values.
         // Everything that is already in the buffer queue is ok and will be handled by the corresponding function below depending on the switch mode.
         fragmentModel.abortRequests();
@@ -670,6 +671,7 @@ function StreamProcessor(config) {
             const bufferLevel = bufferController.getBufferLevel();
             const abandonmentState = abrController.getAbandonmentStateFor(streamInfo.id, type);
 
+            // The quality we originally requested was lower than the new quality
             if (request.quality < representationInfo.quality && bufferLevel >= safeBufferLevel && abandonmentState !== MetricsConstants.ABANDON_LOAD) {
                 const targetTime = time + safeBufferLevel;
                 setExplicitBufferingTime(targetTime);
@@ -853,7 +855,7 @@ function StreamProcessor(config) {
             let bitrate = null;
 
             if ((realAdaptation === null || (realAdaptation.id !== newRealAdaptation.id)) && type !== Constants.TEXT) {
-                averageThroughput = abrController.getThroughputHistory().getAverageThroughput(type);
+                averageThroughput = abrController.getThroughputHistory().getAverageThroughput(type, isDynamic);
                 bitrate = averageThroughput || abrController.getInitialBitrateFor(type, streamInfo.id);
                 quality = abrController.getQualityForBitrate(mediaInfo, bitrate, streamInfo.id);
             } else {
@@ -953,8 +955,8 @@ function StreamProcessor(config) {
         // If we switch tracks this event might be fired after the representations in the RepresentationController have been updated according to the new MediaInfo.
         // In this case there will be no currentRepresentation and voRepresentation matching the "old" quality
         if (currentRepresentation && voRepresentation) {
-            const eventStreamMedia = adapter.getEventsFor(currentRepresentation.mediaInfo);
-            const eventStreamTrack = adapter.getEventsFor(currentRepresentation, voRepresentation);
+            const eventStreamMedia = adapter.getEventsFor(currentRepresentation.mediaInfo, null, streamInfo);
+            const eventStreamTrack = adapter.getEventsFor(currentRepresentation, voRepresentation, streamInfo);
 
             if (eventStreamMedia && eventStreamMedia.length > 0 || eventStreamTrack && eventStreamTrack.length > 0) {
                 const request = fragmentModel.getRequests({
@@ -1104,7 +1106,8 @@ function StreamProcessor(config) {
 
     function _bufferClearedForNonReplacement() {
         const time = playbackController.getTime();
-        const targetTime = bufferController.getContinuousBufferTimeForTargetTime(time);
+        const continuousBufferTime = bufferController.getContinuousBufferTimeForTargetTime(time);
+        const targetTime = isNaN(continuousBufferTime) ? time : continuousBufferTime;
 
         setExplicitBufferingTime(targetTime);
         scheduleController.startScheduleTimer();
@@ -1151,7 +1154,7 @@ function StreamProcessor(config) {
     }
 
     function _onSeekTarget(e) {
-        if (e && e.time) {
+        if (e && !isNaN(e.time)) {
             setExplicitBufferingTime(e.time);
             bufferController.setSeekTarget(e.time);
         }

@@ -335,15 +335,16 @@ function BufferController(config) {
 
         // Check if current buffered range already contains seek target (and current video element time)
         const currentTime = playbackController.getTime();
-        let range = getRangeAt(seekTarget, 0);
-        if (currentTime === seekTarget && range) {
+        const rangeAtCurrenTime = getRangeAt(currentTime, 0);
+        const rangeAtSeekTarget = getRangeAt(seekTarget, 0);
+        if (rangeAtCurrenTime && rangeAtSeekTarget && rangeAtCurrenTime.start === rangeAtSeekTarget.start) {
             seekTarget = NaN;
             return;
         }
 
         // Get buffered range corresponding to the seek target
         const segmentDuration = representationController.getCurrentRepresentation().segmentDuration;
-        range = getRangeAt(seekTarget, segmentDuration);
+        const range = getRangeAt(seekTarget, segmentDuration);
         if (!range) return;
 
         if (settings.get().streaming.buffer.enableSeekDecorrelationFix && Math.abs(currentTime - seekTarget) > segmentDuration) {
@@ -354,12 +355,10 @@ function BufferController(config) {
             if (seekTarget <= range.end) {
                 // Seek video element to seek target or range start if appended buffer starts after seek target (segments timeline/template tolerance)
                 playbackController.seek(Math.max(seekTarget, range.start), false, true);
-                seekTarget = NaN;
             }
         } else if (currentTime < range.start) {
             // If appended buffer starts after seek target (segments timeline/template tolerance) then seek to range start
             playbackController.seek(range.start, false, true);
-            seekTarget = NaN;
         }
     }
 
@@ -666,8 +665,8 @@ function BufferController(config) {
 
     function _checkIfBufferingCompleted() {
         const isLastIdxAppended = maxAppendedIndex >= maximumIndex - 1; // Handles 0 and non 0 based request index
-        const periodBuffered = playbackController.getTimeToStreamEnd(streamInfo) - bufferLevel <= 0;
-
+        // To avoid rounding error when comparing, the stream time and buffer level only must be within 5 decimal places
+        const periodBuffered = playbackController.getTimeToStreamEnd(streamInfo) - bufferLevel < 0.00001;
         if ((isLastIdxAppended || periodBuffered) && !isBufferingCompleted) {
             setIsBufferingCompleted(true);
             logger.debug(`checkIfBufferingCompleted trigger BUFFERING_COMPLETED for stream id ${streamInfo.id} and type ${type}`);
@@ -681,10 +680,10 @@ function BufferController(config) {
         // When the player is working in low latency mode, the buffer is often below STALL_THRESHOLD.
         // So, when in low latency mode, change dash.js behavior so it notifies a stall just when
         // buffer reach 0 seconds
-        if (((!settings.get().streaming.lowLatencyEnabled && bufferLevel < settings.get().streaming.buffer.stallThreshold) || bufferLevel === 0) && !isBufferingCompleted) {
+        if (((!playbackController.getLowLatencyModeEnabled() && bufferLevel < settings.get().streaming.buffer.stallThreshold) || bufferLevel === 0) && !isBufferingCompleted) {
             _notifyBufferStateChanged(MetricsConstants.BUFFER_EMPTY);
         } else {
-            if (isBufferingCompleted || bufferLevel >= settings.get().streaming.buffer.stallThreshold || (settings.get().streaming.lowLatencyEnabled && bufferLevel > 0)) {
+            if (isBufferingCompleted || bufferLevel >= settings.get().streaming.buffer.stallThreshold || (playbackController.getLowLatencyModeEnabled() && bufferLevel > 0)) {
                 _notifyBufferStateChanged(MetricsConstants.BUFFER_LOADED);
             }
         }
@@ -975,7 +974,7 @@ function BufferController(config) {
             const ranges = sourceBufferSink.getAllBufferRanges();
 
             if (!ranges || ranges.length === 0) {
-                return targetTime;
+                return NaN;
             }
 
             let i = 0;
@@ -991,7 +990,7 @@ function BufferController(config) {
                 i += 1;
             }
 
-            return adjustedTime;
+            return adjustedTime === targetTime ? NaN : adjustedTime;
 
         } catch (e) {
 
@@ -1027,14 +1026,14 @@ function BufferController(config) {
         seekTarget = NaN;
 
         if (sourceBufferSink) {
+            let tmpSourceBufferSinkToReset = sourceBufferSink;
+            sourceBufferSink = null;
             if (!errored && !keepBuffers) {
-                sourceBufferSink.abort()
+                tmpSourceBufferSinkToReset.abort()
                     .then(() => {
-                        sourceBufferSink.reset(keepBuffers);
-                        sourceBufferSink = null;
+                        tmpSourceBufferSinkToReset.reset(keepBuffers);
+                        tmpSourceBufferSinkToReset = null;
                     });
-            } else {
-                sourceBufferSink = null;
             }
         }
 
